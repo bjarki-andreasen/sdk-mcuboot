@@ -32,5 +32,8 @@
 #else
 #error "Cannot configure mbedTLS; signature type is unknown."
 #endif
-
+/* This define prevents include of psa/crypto from requing knowledge of the 
+ * PSA crypto drivers. see psa/crypto_structs.h for details
+ */
+#define MBEDTLS_PSA_CRYPTO_CLIENT
 #endif
