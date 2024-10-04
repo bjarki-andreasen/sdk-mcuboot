@@ -69,6 +69,10 @@
 
 #endif /* CONFIG_SOC_FAMILY_ESPRESSIF_ESP32 */
 
+#ifdef CONFIG_FW_INFO
+#include <fw_info.h>
+#endif
+
 #ifdef CONFIG_MCUBOOT_SERIAL
 #include "boot_serial/boot_serial.h"
 #include "serial_adapter/serial_adapter.h"
@@ -85,6 +89,10 @@ const struct boot_uart_funcs boot_funcs = {
 
 #if CONFIG_MCUBOOT_CLEANUP_ARM_CORE
 #include <arm_cleanup.h>
+#endif
+
+#if defined(CONFIG_SOC_NRF5340_CPUAPP) && defined(PM_CPUNET_B0N_ADDRESS)
+#include <dfu/pcd.h>
 #endif
 
 /* CONFIG_LOG_MINIMAL is the legacy Kconfig property,
@@ -129,6 +137,15 @@ K_SEM_DEFINE(boot_log_sem, 1, 1);
         * !defined(ZEPHYR_LOG_MODE_MINIMAL)
 	*/
 
+#if USE_PARTITION_MANAGER && CONFIG_FPROTECT
+#include <fprotect.h>
+#include <pm_config.h>
+#endif
+
+#if CONFIG_MCUBOOT_NRF_CLEANUP_PERIPHERAL || CONFIG_MCUBOOT_NRF_CLEANUP_NONSECURE_RAM
+#include <nrf_cleanup.h>
+#endif
+
 BOOT_LOG_MODULE_REGISTER(mcuboot);
 
 void os_heap_init(void);
@@ -157,26 +174,16 @@ static void do_boot(struct boot_rsp *rsp)
     /* Get ram address for image */
     vt = (struct arm_vector_table *)(rsp->br_hdr->ih_load_addr + rsp->br_hdr->ih_hdr_size);
 #else
+    uintptr_t flash_base;
     int rc;
-    const struct flash_area *fap;
-    static uint32_t dst[2];
 
     /* Jump to flash image */
-    rc = flash_area_open(rsp->br_flash_dev_id, &fap);
+    rc = flash_device_base(rsp->br_flash_dev_id, &flash_base);
     assert(rc == 0);
 
-    rc = flash_area_read(fap, rsp->br_hdr->ih_hdr_size, dst, sizeof(dst));
-    assert(rc == 0);
-#ifndef CONFIG_ASSERT
-    /* Enter a lock up as asserts are disabled */
-    if (rc != 0) {
-        while (1);
-    }
-#endif
-
-    flash_area_close(fap);
-
-    vt = (struct arm_vector_table *)dst;
+    vt = (struct arm_vector_table *)(flash_base +
+                                     rsp->br_image_off +
+                                     rsp->br_hdr->ih_hdr_size);
 #endif
 
     if (IS_ENABLED(CONFIG_SYSTEM_TIMER_HAS_DISABLE_SUPPORT)) {
@@ -186,6 +193,34 @@ static void do_boot(struct boot_rsp *rsp)
 #ifdef CONFIG_USB_DEVICE_STACK
     /* Disable the USB to prevent it from firing interrupts */
     usb_disable();
+#endif
+
+#if defined(CONFIG_FW_INFO) && !defined(CONFIG_EXT_API_PROVIDE_EXT_API_UNUSED)
+    uintptr_t fw_start_addr;
+
+    rc = flash_device_base(rsp->br_flash_dev_id, &fw_start_addr);
+    assert(rc == 0);
+
+    fw_start_addr += rsp->br_image_off + rsp->br_hdr->ih_hdr_size;
+
+    const struct fw_info *firmware_info = fw_info_find(fw_start_addr);
+    bool provided = fw_info_ext_api_provide(firmware_info, true);
+
+#ifdef PM_S0_ADDRESS
+    /* Only fail if the immutable bootloader is present. */
+    if (!provided) {
+	if (firmware_info == NULL) {
+            BOOT_LOG_WRN("Unable to find firmware info structure in %p", vt);
+	}
+        BOOT_LOG_ERR("Failed to provide EXT_APIs to %p", vt);
+    }
+#endif
+#endif
+#if CONFIG_MCUBOOT_NRF_CLEANUP_PERIPHERAL
+    nrf_cleanup_peripheral();
+#endif
+#if CONFIG_MCUBOOT_NRF_CLEANUP_NONSECURE_RAM && defined(PM_SRAM_NONSECURE_NAME)
+    nrf_cleanup_ns_ram();
 #endif
 #if CONFIG_MCUBOOT_CLEANUP_ARM_CORE
     cleanup_arm_nvic(); /* cleanup NVIC registers */
@@ -552,7 +587,33 @@ int main(void)
 
     mcuboot_status_change(MCUBOOT_STATUS_BOOTABLE_IMAGE_FOUND);
 
+#if USE_PARTITION_MANAGER && CONFIG_FPROTECT
+
+#ifdef PM_S1_ADDRESS
+/* MCUBoot is stored in either S0 or S1, protect both */
+#define PROTECT_SIZE (PM_MCUBOOT_PRIMARY_ADDRESS - PM_S0_ADDRESS)
+#define PROTECT_ADDR PM_S0_ADDRESS
+#else
+/* There is only one instance of MCUBoot */
+#define PROTECT_SIZE (PM_MCUBOOT_PRIMARY_ADDRESS - PM_MCUBOOT_ADDRESS)
+#define PROTECT_ADDR PM_MCUBOOT_ADDRESS
+#endif
+
+    rc = fprotect_area(PROTECT_ADDR, PROTECT_SIZE);
+
+    if (rc != 0) {
+        BOOT_LOG_ERR("Protect mcuboot flash failed, cancel startup.");
+        while (1)
+            ;
+    }
+
+#if defined(CONFIG_SOC_NRF5340_CPUAPP) && defined(PM_CPUNET_B0N_ADDRESS) && defined(CONFIG_PCD_APP)
+    pcd_lock_ram();
+#endif
+#endif /* USE_PARTITION_MANAGER && CONFIG_FPROTECT */
+
     ZEPHYR_BOOT_LOG_STOP();
+
     do_boot(&rsp);
 
     mcuboot_status_change(MCUBOOT_STATUS_BOOT_FAILED);

@@ -40,9 +40,18 @@
 #define MCUBOOT_USE_TINYCRYPT
 #elif defined(CONFIG_BOOT_USE_CC310)
 #define MCUBOOT_USE_CC310
-#ifdef CONFIG_BOOT_USE_NRF_CC310_BL
-#define MCUBOOT_USE_NRF_CC310_BL
+#elif defined(CONFIG_MBEDTLS_PSA_CRYPTO_CLIENT)
+#define MCUBOOT_USE_PSA_CRYPTO
+#elif defined(CONFIG_BOOT_USE_NRF_EXTERNAL_CRYPTO)
+#define MCUBOOT_USE_NRF_EXTERNAL_CRYPTO
 #endif
+
+#ifdef CONFIG_BOOT_IMG_HASH_ALG_SHA512
+#define MCUBOOT_SHA512
+#endif
+
+#ifdef CONFIG_BOOT_IMG_HASH_ALG_SHA256
+#define MCUBOOT_SHA256
 #endif
 
 /* Zephyr, regardless of C library used, provides snprintf */
@@ -129,6 +138,17 @@
 
 #ifdef CONFIG_BOOT_DECOMPRESSION
 #define MCUBOOT_DECOMPRESS_IMAGES
+#endif
+
+/* Invoke hashing functions directly on storage. This requires for device
+ * to be able to map storage to address space or RAM.
+ */
+#ifdef CONFIG_BOOT_IMG_HASH_DIRECTLY_ON_STORAGE
+#define MCUBOOT_HASH_STORAGE_DIRECTLY
+#endif
+
+#ifdef CONFIG_BOOT_SIGNATURE_TYPE_PURE
+#define MCUBOOT_SIGN_PURE
 #endif
 
 #ifdef CONFIG_BOOT_BOOTSTRAP

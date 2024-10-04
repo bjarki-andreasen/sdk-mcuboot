@@ -27,23 +27,20 @@ assert_exists(FIAT_DIR)
 # Path to mbed-tls' asn1 parser library.
 set(MBEDTLS_ASN1_DIR "${MCUBOOT_DIR}/ext/mbedtls-asn1")
 assert_exists(MBEDTLS_ASN1_DIR)
-set(NRF_DIR "${MCUBOOT_DIR}/ext/nrf")
+set(MCUBOOT_NRF_EXT_DIR "${MCUBOOT_DIR}/ext/nrf")
 
 if(CONFIG_BOOT_USE_NRF_CC310_BL)
-set(NRFXLIB_DIR ${ZEPHYR_BASE}/../nrfxlib)
-if(NOT EXISTS ${NRFXLIB_DIR})
-  message(FATAL_ERROR "
+  if(NOT EXISTS ${ZEPHYR_NRFXLIB_MODULE_DIR})
+    message(FATAL_ERROR "
     ------------------------------------------------------------------------
-    No such file or directory: ${NRFXLIB_DIR}
+    No such file or directory: ${ZEPHYR_NRFXLIB_MODULE_DIR}
     The current configuration enables nRF CC310 crypto accelerator hardware
     with the `CONFIG_BOOT_USE_NRF_CC310_BL` option. Please follow
     `ext/nrf/README.md` guide to fix your setup or use tinycrypt instead of
     the HW accelerator.
     To use the tinycrypt set `CONFIG_BOOT_ECDSA_TINYCRYPT` to y.
     ------------------------------------------------------------------------")
-endif()
-# Don't include this if we are using west
- add_subdirectory(${NRFXLIB_DIR} ${PROJECT_BINARY_DIR}/nrfxlib)
+  endif()
 endif()
 
 zephyr_library_include_directories(
@@ -52,6 +49,12 @@ zephyr_library_include_directories(
   )
 if(EXISTS targets/${BOARD}.h)
   zephyr_library_compile_definitions(MCUBOOT_TARGET_CONFIG="${BOARD}.h")
+endif()
+
+if(DEFINED CONFIG_MBEDTLS)
+  zephyr_library_include_directories(
+    ${ZEPHYR_MBEDTLS_MODULE_DIR}/include
+  )
 endif()
 
 # Zephyr port-specific sources.
@@ -104,6 +107,10 @@ zephyr_library_sources(
   ${BOOT_DIR}/bootutil/src/bootutil_misc.c
   ${BOOT_DIR}/bootutil/src/fault_injection_hardening.c
   )
+
+if(DEFINED CONFIG_BOOT_ENCRYPT_X25519 AND DEFINED CONFIG_BOOT_ED25519_PSA)
+  zephyr_library_sources(${BOOT_DIR}/bootutil/src/encrypted_psa.c)
+endif()
 
 if(DEFINED CONFIG_MEASURED_BOOT OR DEFINED CONFIG_BOOT_SHARE_DATA)
   zephyr_library_sources(
@@ -171,9 +178,11 @@ if(CONFIG_BOOT_SIGNATURE_TYPE_ECDSA_P256 OR CONFIG_BOOT_ENCRYPT_EC256)
     ${TINYCRYPT_DIR}/source/utils.c
     )
   elseif(CONFIG_BOOT_USE_NRF_CC310_BL)
-    zephyr_library_sources(${NRF_DIR}/cc310_glue.c)
-    zephyr_library_include_directories(${NRF_DIR})
+    zephyr_library_sources(${MCUBOOT_NRF_EXT_DIR}/cc310_glue.c)
+    zephyr_library_include_directories(${MCUBOOT_NRF_EXT_DIR})
     zephyr_link_libraries(nrfxlib_crypto)
+  elseif(CONFIG_BOOT_USE_NRF_EXTERNAL_CRYPTO)
+    zephyr_include_directories(${BL_CRYPTO_DIR}/../include)
   endif()
 
   # Since here we are not using Zephyr's mbedTLS but rather our own, we need
@@ -231,25 +240,40 @@ elseif(CONFIG_BOOT_SIGNATURE_TYPE_ED25519 OR CONFIG_BOOT_ENCRYPT_X25519)
     ${FIAT_DIR}/include/
   )
 
-  zephyr_library_sources(
-    ${FIAT_DIR}/src/curve25519.c
-  )
+  if(NOT CONFIG_BOOT_ED25519_PSA)
+    zephyr_library_sources(
+      ${FIAT_DIR}/src/curve25519.c
+    )
+  else()
+    zephyr_library_sources(
+      ${MBEDTLS_ASN1_DIR}/src/asn1parse.c
+      ${BOOT_DIR}/bootutil/src/ed25519_psa.c
+    )
+  endif()
 endif()
 
-if(CONFIG_BOOT_ENCRYPT_EC256 OR CONFIG_BOOT_ENCRYPT_X25519)
-  zephyr_library_sources(
-    ${TINYCRYPT_DIR}/source/aes_encrypt.c
-    ${TINYCRYPT_DIR}/source/aes_decrypt.c
-    ${TINYCRYPT_DIR}/source/ctr_mode.c
-    ${TINYCRYPT_DIR}/source/hmac.c
-    ${TINYCRYPT_DIR}/source/ecc_dh.c
+if(NOT CONFIG_BOOT_ED25519_PSA)
+  if(CONFIG_BOOT_ENCRYPT_EC256 OR CONFIG_BOOT_ENCRYPT_X25519)
+    zephyr_library_sources(
+      ${TINYCRYPT_DIR}/source/aes_encrypt.c
+      ${TINYCRYPT_DIR}/source/aes_decrypt.c
+      ${TINYCRYPT_DIR}/source/ctr_mode.c
+      ${TINYCRYPT_DIR}/source/hmac.c
+      ${TINYCRYPT_DIR}/source/ecc_dh.c
     )
+  endif()
 endif()
 
 if(CONFIG_BOOT_ENCRYPT_EC256)
   zephyr_library_sources(
     ${TINYCRYPT_DIR}/source/ecc_dh.c
     )
+endif()
+
+if(CONFIG_BOOT_DECOMPRESSION)
+  zephyr_library_sources(
+    decompression.c
+  )
 endif()
 
 if(CONFIG_MCUBOOT_SERIAL)
@@ -296,6 +320,13 @@ if(NOT CONFIG_BOOT_SIGNATURE_KEY_FILE STREQUAL "")
     set(KEY_FILE ${MCUBOOT_DIR}/${CONFIG_BOOT_SIGNATURE_KEY_FILE})
   endif()
   message("MCUBoot bootloader key file: ${KEY_FILE}")
+
+  set_property(
+	GLOBAL
+	PROPERTY
+	KEY_FILE
+	${KEY_FILE}
+	)
 
   set(GENERATED_PUBKEY ${ZEPHYR_BINARY_DIR}/autogen-pubkey.c)
   add_custom_command(
@@ -568,4 +599,21 @@ if(SYSBUILD)
 
   set(mcuboot_image_footer_size ${required_size} CACHE INTERNAL "Estimated MCUboot image trailer size" FORCE)
   set(mcuboot_image_upgrade_footer_size ${required_upgrade_size} CACHE INTERNAL "Estimated MCUboot update image trailer size" FORCE)
+endif()
+
+if(CONFIG_MCUBOOT_NRF_CLEANUP_PERIPHERAL OR CONFIG_MCUBOOT_CLEANUP_NONSECURE_RAM)
+zephyr_library_sources(
+  ${BOOT_DIR}/zephyr/nrf_cleanup.c
+)
+endif()
+
+if(SYSBUILD AND CONFIG_PCD_APP)
+    # Sysbuild requires details of the RAM flash device are stored to the cache of MCUboot so
+    # that they can be read when running partition manager
+    dt_nodelabel(ram_flash_dev NODELABEL flash_sim0)
+    dt_reg_addr(ram_flash_addr PATH ${ram_flash_dev})
+    dt_reg_size(ram_flash_size PATH ${ram_flash_dev})
+
+    set(RAM_FLASH_ADDR "${ram_flash_addr}" CACHE STRING "" FORCE)
+    set(RAM_FLASH_SIZE "${ram_flash_size}" CACHE STRING "" FORCE)
 endif()
